@@ -1,11 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Mail, Lock, Eye, EyeOff, User, AlertCircle, CheckCircle } from 'lucide-react';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
   updateProfile,
   sendPasswordResetEmail
 } from 'firebase/auth';
@@ -25,28 +23,6 @@ export default function LoginPage({ onLoginSuccess }) {
 
   // Detect mobile device
   const isMobile = /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
-
-  // Handle Google redirect result when page loads (mobile flow)
-  useEffect(() => {
-    const handleRedirectResult = async () => {
-      try {
-        setIsLoading(true);
-        const result = await getRedirectResult(auth);
-        if (result?.user) {
-          const user = await saveUserToFirestore(result.user, { loginMethod: 'google' });
-          setSuccessMessage('Google login successful! Redirecting...');
-          setTimeout(() => onLoginSuccess(user), 800);
-        }
-      } catch (err) {
-        if (err.code && err.code !== 'auth/no-current-user') {
-          setErrors({ form: 'Google login failed. Please try again.' });
-        }
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    handleRedirectResult();
-  }, []);
 
   const handleForgotPassword = async () => {
     if (!resetEmail.trim()) {
@@ -153,21 +129,25 @@ export default function LoginPage({ onLoginSuccess }) {
     setIsLoading(true);
     setErrors({});
     try {
-      if (isMobile) {
-        // Mobile: use redirect (popups are blocked on mobile browsers)
-        await signInWithRedirect(auth, googleProvider);
-        // Page will reload — result handled in useEffect above
-      } else {
-        // Desktop: use popup
-        const result = await signInWithPopup(auth, googleProvider);
-        const user = await saveUserToFirestore(result.user, { loginMethod: 'google' });
-        setSuccessMessage('Google login successful! Redirecting...');
-        setTimeout(() => onLoginSuccess(user), 800);
-      }
+      // Use popup for all devices — redirect causes sessionStorage issues
+      // on Safari, Firefox, and partitioned browser environments
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
+      const result = await signInWithPopup(auth, googleProvider);
+      const user = await saveUserToFirestore(result.user, { loginMethod: 'google' });
+      setSuccessMessage('Google login successful! Redirecting...');
+      setTimeout(() => onLoginSuccess(user), 800);
     } catch (err) {
-      if (err.code !== 'auth/popup-closed-by-user') {
-        setErrors({ form: 'Google login failed. Please try again.' });
+      console.error('Google login error:', err.code, err.message);
+      if (err.code === 'auth/popup-blocked') {
+        setErrors({ form: 'Popup was blocked by your browser. Please allow popups for this site and try again.' });
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        // User closed popup — no error needed
+      } else if (err.code === 'auth/cancelled-popup-request') {
+        // Another popup opened — ignore
+      } else {
+        setErrors({ form: `Google login failed: ${err.message || 'Please try again.'}` });
       }
+    } finally {
       setIsLoading(false);
     }
   };

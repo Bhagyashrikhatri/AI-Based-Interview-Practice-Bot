@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Mail, Lock, Eye, EyeOff, User, AlertCircle, CheckCircle } from 'lucide-react';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signInWithPopup,
-  updateProfile
+  signInWithRedirect,
+  getRedirectResult,
+  updateProfile,
+  sendPasswordResetEmail
 } from 'firebase/auth';
 import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db, googleProvider } from './firebase';
@@ -16,8 +19,66 @@ export default function LoginPage({ onLoginSuccess }) {
   const [errors, setErrors] = useState({});
   const [isLoading, setIsLoading] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [showForgotModal, setShowForgotModal] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetStatus, setResetStatus] = useState({ msg: '', isError: false });
 
-  const validateEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  // Detect mobile device
+  const isMobile = /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
+
+  // Handle Google redirect result when page loads (mobile flow)
+  useEffect(() => {
+    const handleRedirectResult = async () => {
+      try {
+        setIsLoading(true);
+        const result = await getRedirectResult(auth);
+        if (result?.user) {
+          const user = await saveUserToFirestore(result.user, { loginMethod: 'google' });
+          setSuccessMessage('Google login successful! Redirecting...');
+          setTimeout(() => onLoginSuccess(user), 800);
+        }
+      } catch (err) {
+        if (err.code && err.code !== 'auth/no-current-user') {
+          setErrors({ form: 'Google login failed. Please try again.' });
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    handleRedirectResult();
+  }, []);
+
+  const handleForgotPassword = async () => {
+    if (!resetEmail.trim()) {
+      setResetStatus({ msg: 'Please enter your email address.', isError: true });
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resetEmail)) {
+      setResetStatus({ msg: 'Please enter a valid email address.', isError: true });
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, resetEmail);
+      setResetStatus({
+        msg: `✅ Password reset email sent to ${resetEmail}. Check your inbox (and spam folder).`,
+        isError: false
+      });
+      setResetEmail('');
+    } catch (err) {
+      const msg = {
+        'auth/user-not-found': 'No account found with this email address.',
+        'auth/invalid-email': 'Invalid email address.',
+        'auth/too-many-requests': 'Too many attempts. Please try again later.',
+      }[err.code] || 'Failed to send reset email. Please try again.';
+      setResetStatus({ msg, isError: true });
+    }
+  };
+
+  const closeForgotModal = () => {
+    setShowForgotModal(false);
+    setResetEmail('');
+    setResetStatus({ msg: '', isError: false });
+  };
   const validatePassword = (password) => password.length >= 6;
 
   const validateForm = () => {
@@ -90,16 +151,23 @@ export default function LoginPage({ onLoginSuccess }) {
 
   const handleGoogleLogin = async () => {
     setIsLoading(true);
+    setErrors({});
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const user = await saveUserToFirestore(result.user, { loginMethod: 'google' });
-      setSuccessMessage('Google login successful! Redirecting...');
-      setTimeout(() => onLoginSuccess(user), 800);
+      if (isMobile) {
+        // Mobile: use redirect (popups are blocked on mobile browsers)
+        await signInWithRedirect(auth, googleProvider);
+        // Page will reload — result handled in useEffect above
+      } else {
+        // Desktop: use popup
+        const result = await signInWithPopup(auth, googleProvider);
+        const user = await saveUserToFirestore(result.user, { loginMethod: 'google' });
+        setSuccessMessage('Google login successful! Redirecting...');
+        setTimeout(() => onLoginSuccess(user), 800);
+      }
     } catch (err) {
       if (err.code !== 'auth/popup-closed-by-user') {
         setErrors({ form: 'Google login failed. Please try again.' });
       }
-    } finally {
       setIsLoading(false);
     }
   };
@@ -215,7 +283,13 @@ export default function LoginPage({ onLoginSuccess }) {
 
             {isLogin && (
               <div className="text-right">
-                <button type="button" className="text-sm text-blue-600 hover:text-blue-800 font-semibold">Forgot Password?</button>
+                <button
+                  type="button"
+                  onClick={() => { setShowForgotModal(true); setResetEmail(formData.email); }}
+                  className="text-sm text-blue-600 hover:text-blue-800 font-semibold underline"
+                >
+                  Forgot Password?
+                </button>
               </div>
             )}
 
@@ -255,6 +329,70 @@ export default function LoginPage({ onLoginSuccess }) {
           </button>
         </p>
       </div>
+
+      {/* ── Forgot Password Modal ───────────────────────────────────── */}
+      {showForgotModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl shadow-2xl p-8 w-full max-w-md">
+            {/* Header */}
+            <div className="text-center mb-6">
+              <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-100 rounded-full mb-3">
+                <span className="text-3xl">🔑</span>
+              </div>
+              <h2 className="text-2xl font-bold text-gray-800">Reset Password</h2>
+              <p className="text-gray-500 text-sm mt-1">
+                Enter your email and we'll send you a reset link
+              </p>
+            </div>
+
+            {/* Status message */}
+            {resetStatus.msg && (
+              <div className={`mb-5 p-4 rounded-xl border-2 flex items-start gap-3 ${
+                resetStatus.isError
+                  ? 'bg-red-50 border-red-200 text-red-700'
+                  : 'bg-green-50 border-green-200 text-green-700'
+              }`}>
+                <span className="text-lg flex-shrink-0">
+                  {resetStatus.isError ? '❌' : '✅'}
+                </span>
+                <p className="text-sm font-semibold">{resetStatus.msg}</p>
+              </div>
+            )}
+
+            {/* Email input */}
+            <div className="mb-5">
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Email Address
+              </label>
+              <div className="relative">
+                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
+                <input
+                  type="email"
+                  value={resetEmail}
+                  onChange={e => { setResetEmail(e.target.value); setResetStatus({ msg: '', isError: false }); }}
+                  onKeyPress={e => e.key === 'Enter' && handleForgotPassword()}
+                  placeholder="Enter your email address"
+                  className="w-full pl-12 pr-4 py-3 border-2 border-gray-200 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all"
+                />
+              </div>
+            </div>
+
+            {/* Buttons */}
+            <button
+              onClick={handleForgotPassword}
+              className="w-full py-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white font-bold rounded-xl hover:shadow-lg transition-all mb-3"
+            >
+              Send Reset Email
+            </button>
+            <button
+              onClick={closeForgotModal}
+              className="w-full py-3 bg-gray-100 text-gray-600 font-semibold rounded-xl hover:bg-gray-200 transition-all"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
